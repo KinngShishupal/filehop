@@ -5,6 +5,7 @@ import { FileRow } from '../components/FileRow';
 import { Header } from '../components/Header';
 import { Pulse } from '../components/Pulse';
 import { TransferCard } from '../components/TransferCard';
+import { WifiOffBanner } from '../components/WifiOffBanner';
 import { useGuardedBack } from '../hooks/useGuardedBack';
 import { useTransfers } from '../hooks/useTransfers';
 import {
@@ -86,6 +87,7 @@ export function ReceiveScreen({ deviceName, onBack }: Props) {
     <View style={styles.container}>
       <Header title="Receive" onBack={goBack} />
       <ScrollView contentContainerStyle={styles.content}>
+        <WifiOffBanner />
         <View style={styles.beacon}>
           <Pulse color={colors.receive} glyph="↓" />
           {startError ? (

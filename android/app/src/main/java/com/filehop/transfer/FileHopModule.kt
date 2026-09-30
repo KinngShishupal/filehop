@@ -20,6 +20,7 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableArray
 import com.facebook.react.bridge.UiThreadUtil
 import com.facebook.react.bridge.WritableMap
+import java.net.InetSocketAddress
 import java.util.UUID
 import java.util.concurrent.Executors
 
@@ -40,6 +41,10 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
   private val engine = TransferEngine(reactContext, this)
   private val io = Executors.newSingleThreadExecutor()
   private val deviceId: String by lazy { loadDeviceId() }
+
+  private val direct = WifiDirect(reactContext)
+  // Serializes Wi-Fi Direct group setup/teardown so leaving and re-entering a screen can't race.
+  private val directIo = Executors.newSingleThreadExecutor()
 
   private var announcer: Announcer? = null
   private var scanner: Scanner? = null
@@ -169,6 +174,27 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
       }
     }
 
+  /** Wi-Fi Direct rides on the Wi-Fi radio: it needs Wi-Fi on, but not connected to anything. */
+  @ReactMethod
+  fun isWifiEnabled(promise: Promise) {
+    val wifi = reactContext.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    promise.resolve(wifi.isWifiEnabled)
+  }
+
+  @ReactMethod
+  fun openWifiSettings() {
+    // Apps can't toggle Wi-Fi themselves since Android 10; the panel lets the user do it in place.
+    val action =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) Settings.Panel.ACTION_WIFI else Settings.ACTION_WIFI_SETTINGS
+    try {
+      val activity = reactContext.currentActivity
+      if (activity != null) activity.startActivity(Intent(action))
+      else reactContext.startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (e: ActivityNotFoundException) {
+      reactContext.startActivity(Intent(Settings.ACTION_WIFI_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+  }
+
   @ReactMethod
   fun openFile(uri: String, mime: String, promise: Promise) {
     val view =
@@ -189,16 +215,21 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
   // --------------------------------------------------------------- receiving
 
   @ReactMethod
-  fun startReceiving(displayName: String, promise: Promise) {
+  fun startReceiving(displayName: String, useDirect: Boolean, promise: Promise) {
     try {
       val port = engine.startServer()
       announcer?.stop()
       announcer = Announcer(deviceId, displayName, port).also { it.start() }
       setBusy("receive-mode", true)
+      val directOn = useDirect && direct.isAvailable
+      if (directOn) {
+        directIo.execute { direct.startHosting(deviceId, displayName, port, engine::hasActiveTransfers) }
+      }
       promise.resolve(
         Arguments.createMap().apply {
           putInt("port", port)
           putArray("addresses", Arguments.fromList(NetUtils.localIpv4Addresses()))
+          putBoolean("direct", directOn)
         }
       )
     } catch (e: Exception) {
@@ -211,6 +242,7 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
     announcer?.stop()
     announcer = null
     engine.stopServer()
+    directIo.execute { direct.stopHosting() }
     setBusy("receive-mode", false)
   }
 
@@ -220,23 +252,16 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
   // ----------------------------------------------------------------- sending
 
   @ReactMethod
-  fun startDiscovery(promise: Promise) {
+  fun startDiscovery(useDirect: Boolean, promise: Promise) {
     try {
       if (scanner == null) {
         acquireMulticastLock()
         scanner =
-          Scanner(deviceId) { device ->
-              emit(
-                EVENT_DEVICE,
-                Arguments.createMap().apply {
-                  putString("id", device.id)
-                  putString("name", device.name)
-                  putString("host", device.host)
-                  putInt("port", device.port)
-                },
-              )
-            }
+          Scanner(deviceId) { device -> emitDevice(device.id, device.name, device.host, device.port, "lan") }
             .also { it.start() }
+      }
+      if (useDirect && direct.isAvailable) {
+        direct.startScanning(deviceId) { peer -> emitDevice(peer.id, peer.name, "", peer.port, "direct") }
       }
       promise.resolve(null)
     } catch (e: Exception) {
@@ -250,10 +275,47 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
     scanner?.stop()
     scanner = null
     releaseMulticastLock()
+    direct.stopScanning()
+    directIo.execute { direct.disconnect() }
+  }
+
+  private fun emitDevice(id: String, name: String, host: String, port: Int, transport: String) {
+    emit(
+      EVENT_DEVICE,
+      Arguments.createMap().apply {
+        putString("id", id)
+        putString("name", name)
+        putString("host", host)
+        putInt("port", port)
+        putString("transport", transport)
+      },
+    )
   }
 
   @ReactMethod
   fun sendFiles(host: String, port: Int, senderName: String, files: ReadableArray, promise: Promise) {
+    val outgoing = outgoingFiles(files, promise) ?: return
+    promise.resolve(engine.send(host, port, senderName, outgoing))
+  }
+
+  /** Sends to a receiver found over Wi-Fi Direct, joining its group first. */
+  @ReactMethod
+  fun sendFilesDirect(deviceId: String, senderName: String, files: ReadableArray, promise: Promise) {
+    val peer = direct.peer(deviceId)
+    if (peer == null) {
+      promise.reject("E_PEER", "That phone is no longer nearby")
+      return
+    }
+    val outgoing = outgoingFiles(files, promise) ?: return
+    // The group owner's DHCP can lag a moment behind "connected", hence the connect retries.
+    val id =
+      engine.send(senderName, outgoing, connectAttempts = 5) {
+        InetSocketAddress(direct.connect(peer), peer.port)
+      }
+    promise.resolve(id)
+  }
+
+  private fun outgoingFiles(files: ReadableArray, promise: Promise): List<OutgoingFile>? {
     val outgoing =
       (0 until files.size()).mapNotNull { i ->
         val map = files.getMap(i) ?: return@mapNotNull null
@@ -265,9 +327,9 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
       }
     if (outgoing.isEmpty() || outgoing.any { it.entry.size < 0 }) {
       promise.reject("E_FILES", "Some files can't be read")
-      return
+      return null
     }
-    promise.resolve(engine.send(host, port, senderName, outgoing))
+    return outgoing
   }
 
   @ReactMethod
@@ -412,6 +474,8 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
   override fun invalidate() {
     stopDiscovery()
     announcer?.stop()
+    directIo.execute { direct.stopHosting() }
+    directIo.shutdown()
     engine.shutdown()
     io.shutdownNow()
     synchronized(this) {

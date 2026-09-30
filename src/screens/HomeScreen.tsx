@@ -43,8 +43,8 @@ export function HomeScreen({ deviceName, onSend, onReceive }: Props) {
         {isSupported ? (
           <>
             <Text style={styles.footerText}>
-              Both phones on the same Wi-Fi, or one joined to the other's
-              hotspot.
+              Keep Wi-Fi turned on. The phones don't need to be on the same
+              network.
             </Text>
             {deviceName ? (
               <Text style={styles.footerText}>You appear as {deviceName}</Text>

@@ -13,14 +13,15 @@ import { Button } from '../components/Button';
 import { FileRow } from '../components/FileRow';
 import { Header } from '../components/Header';
 import { TransferCard } from '../components/TransferCard';
+import { WifiOffBanner } from '../components/WifiOffBanner';
 import { useGuardedBack } from '../hooks/useGuardedBack';
 import { useNearbyDevices } from '../hooks/useNearbyDevices';
 import { useTransfers } from '../hooks/useTransfers';
 import {
   FileHop,
-  NearbyDevice,
   parseManualAddress,
   PickedFile,
+  SendTarget,
 } from '../native/fileHop';
 import { colors, radius, spacing } from '../theme';
 import { formatBytes, pluralize } from '../utils/format';
@@ -49,10 +50,7 @@ export function SendScreen({ deviceName, onBack }: Props) {
     }
   };
 
-  const sendTo = async (
-    target: Pick<NearbyDevice, 'host' | 'port'>,
-    name: string,
-  ) => {
+  const sendTo = async (target: SendTarget, name: string) => {
     if (sendable.length === 0) {
       Alert.alert(
         'Add files first',
@@ -87,6 +85,7 @@ export function SendScreen({ deviceName, onBack }: Props) {
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
       >
+        <WifiOffBanner />
         {transfers.map(t => (
           <TransferCard
             key={t.id}
@@ -159,7 +158,9 @@ export function SendScreen({ deviceName, onBack }: Props) {
                   <Text style={styles.deviceName} numberOfLines={1}>
                     {d.name}
                   </Text>
-                  <Text style={styles.muted}>{d.host}</Text>
+                  <Text style={styles.muted}>
+                    {d.transport === 'direct' ? 'Wi-Fi Direct' : d.host}
+                  </Text>
                 </View>
                 <Text style={styles.link}>Send ›</Text>
               </Pressable>

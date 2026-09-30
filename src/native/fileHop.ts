@@ -18,12 +18,20 @@ export type FileMeta = { name: string; size: number; mime: string };
 
 export type DeviceInfo = { id: string; name: string; addresses: string[] };
 
+/** `lan`: same Wi-Fi / hotspot. `direct`: found over Wi-Fi Direct, no shared network needed. */
+export type Transport = 'lan' | 'direct';
+
 export type NearbyDevice = {
   id: string;
   name: string;
+  /** Empty for `direct` devices; the address is only known once connected. */
   host: string;
   port: number;
+  transport: Transport;
 };
+
+export type SendTarget = Pick<NearbyDevice, 'host' | 'port'> &
+  Partial<Pick<NearbyDevice, 'id' | 'transport'>>;
 
 export type Direction = 'send' | 'receive';
 
@@ -80,16 +88,24 @@ type NativeFileHop = {
   getDeviceInfo(): Promise<DeviceInfo>;
   pickFiles(): Promise<PickedFile[]>;
   openFile(uri: string, mime: string): Promise<void>;
+  isWifiEnabled(): Promise<boolean>;
+  openWifiSettings(): void;
   startReceiving(
     displayName: string,
-  ): Promise<{ port: number; addresses: string[] }>;
+    useDirect: boolean,
+  ): Promise<{ port: number; addresses: string[]; direct: boolean }>;
   stopReceiving(): void;
   respondToIncoming(transferId: string, accept: boolean): void;
-  startDiscovery(): Promise<void>;
+  startDiscovery(useDirect: boolean): Promise<void>;
   stopDiscovery(): void;
   sendFiles(
     host: string,
     port: number,
+    senderName: string,
+    files: PickedFile[],
+  ): Promise<string>;
+  sendFilesDirect(
+    deviceId: string,
     senderName: string,
     files: PickedFile[],
   ): Promise<string>;
@@ -113,22 +129,27 @@ export const FileHop = {
   getDeviceInfo: () => native().getDeviceInfo(),
   pickFiles: () => native().pickFiles(),
   openFile: (uri: string, mime: string) => native().openFile(uri, mime),
+  isWifiEnabled: () => native().isWifiEnabled(),
+  openWifiSettings: () => Native?.openWifiSettings(),
 
   async startReceiving(displayName: string) {
     await ensureLegacyStoragePermission();
-    return native().startReceiving(displayName);
+    const useDirect = await ensureWifiDirectPermission();
+    return native().startReceiving(displayName, useDirect);
   },
   stopReceiving: () => Native?.stopReceiving(),
   respondToIncoming: (transferId: string, accept: boolean) =>
     native().respondToIncoming(transferId, accept),
 
-  startDiscovery: () => native().startDiscovery(),
+  async startDiscovery() {
+    const useDirect = await ensureWifiDirectPermission();
+    return native().startDiscovery(useDirect);
+  },
   stopDiscovery: () => Native?.stopDiscovery(),
-  sendFiles: (
-    device: Pick<NearbyDevice, 'host' | 'port'>,
-    senderName: string,
-    files: PickedFile[],
-  ) => native().sendFiles(device.host, device.port, senderName, files),
+  sendFiles: (device: SendTarget, senderName: string, files: PickedFile[]) =>
+    device.transport === 'direct' && device.id
+      ? native().sendFilesDirect(device.id, senderName, files)
+      : native().sendFiles(device.host, device.port, senderName, files),
   cancelTransfer: (transferId: string) => Native?.cancelTransfer(transferId),
 };
 
@@ -155,6 +176,27 @@ async function ensureLegacyStoragePermission() {
   );
   if (result !== PermissionsAndroid.RESULTS.GRANTED) {
     throw new Error('FileHop needs storage access to save received files.');
+  }
+}
+
+/**
+ * Wi-Fi Direct needs NEARBY_WIFI_DEVICES (Android 13+) or precise location (older). If the user
+ * says no, FileHop still works over a shared Wi-Fi / hotspot, so this never throws.
+ */
+async function ensureWifiDirectPermission(): Promise<boolean> {
+  if (Platform.OS !== 'android') {
+    return false;
+  }
+  const { PERMISSIONS, RESULTS } = PermissionsAndroid;
+  const wanted =
+    Number(Platform.Version) >= 33
+      ? [PERMISSIONS.NEARBY_WIFI_DEVICES]
+      : [PERMISSIONS.ACCESS_FINE_LOCATION, PERMISSIONS.ACCESS_COARSE_LOCATION];
+  try {
+    const result = await PermissionsAndroid.requestMultiple(wanted);
+    return result[wanted[0]] === RESULTS.GRANTED;
+  } catch {
+    return false;
   }
 }
 

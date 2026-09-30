@@ -26,6 +26,15 @@ export function useNearbyDevices(enabled: boolean) {
         if (index === -1) {
           return [...prev, seen];
         }
+        const current = prev[index];
+        // Seen both ways (same Wi-Fi *and* Wi-Fi Direct): the shared network is faster to use.
+        if (
+          device.transport === 'direct' &&
+          current.transport === 'lan' &&
+          current.lastSeen >= Date.now() - STALE_AFTER_MS
+        ) {
+          return prev;
+        }
         const next = prev.slice();
         next[index] = seen;
         return next;

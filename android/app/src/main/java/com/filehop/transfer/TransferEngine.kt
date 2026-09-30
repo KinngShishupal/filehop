@@ -12,6 +12,7 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
@@ -258,20 +259,54 @@ class TransferEngine(private val context: Context, private val listener: Transfe
 
   // ------------------------------------------------------------------ sending
 
-  fun send(host: String, port: Int, senderName: String, files: List<OutgoingFile>): String {
+  fun send(host: String, port: Int, senderName: String, files: List<OutgoingFile>): String =
+    send(senderName, files, connectAttempts = 1) { InetSocketAddress(host, port) }
+
+  /**
+   * [resolve] runs on the transfer thread after CONNECTING is reported, so it may block (e.g. while
+   * joining a Wi-Fi Direct group). Extra [connectAttempts] cover links whose IP isn't ready yet.
+   */
+  fun send(
+    senderName: String,
+    files: List<OutgoingFile>,
+    connectAttempts: Int,
+    resolve: () -> InetSocketAddress,
+  ): String {
     val transferId = UUID.randomUUID().toString()
-    executor.execute { runSend(transferId, host, port, senderName, files) }
+    executor.execute { runSend(transferId, senderName, files, connectAttempts, resolve) }
     return transferId
   }
 
-  private fun runSend(transferId: String, host: String, port: Int, senderName: String, files: List<OutgoingFile>) {
-    val socket = Socket()
+  fun hasActiveTransfers() = sockets.isNotEmpty()
+
+  private fun runSend(
+    transferId: String,
+    senderName: String,
+    files: List<OutgoingFile>,
+    connectAttempts: Int,
+    resolve: () -> InetSocketAddress,
+  ) {
+    var socket = Socket()
     sockets[transferId] = socket
     try {
       listener.onState(transferId, Direction.SEND, TransferState.CONNECTING)
-      socket.sendBufferSize = Protocol.SOCKET_BUFFER_BYTES
-      socket.tcpNoDelay = true
-      socket.connect(InetSocketAddress(host, port), Protocol.CONNECT_TIMEOUT_MS)
+      val address = resolve()
+      if (cancelled.contains(transferId)) throw SocketException("Cancelled")
+      var attempt = 1
+      while (true) {
+        try {
+          socket.sendBufferSize = Protocol.SOCKET_BUFFER_BYTES
+          socket.tcpNoDelay = true
+          socket.connect(address, Protocol.CONNECT_TIMEOUT_MS)
+          break
+        } catch (e: IOException) {
+          if (attempt++ >= connectAttempts || cancelled.contains(transferId)) throw e
+          Thread.sleep(1_000)
+          socket.close()
+          socket = Socket()
+          sockets[transferId] = socket
+        }
+      }
       val output = DataOutputStream(socket.getOutputStream())
       val input = DataInputStream(socket.getInputStream())
 
@@ -359,7 +394,7 @@ class TransferEngine(private val context: Context, private val listener: Transfe
 
   private fun friendlyMessage(error: Exception): String =
     when (error) {
-      is java.net.ConnectException -> "Couldn't reach the other phone. Are you both on the same Wi-Fi?"
+      is java.net.ConnectException -> "Couldn't reach the other phone. Keep FileHop open on its Receive screen and try again."
       is java.net.SocketTimeoutException -> "The other phone stopped responding."
       is EOFException -> "The other phone disconnected."
       is java.net.SocketException -> "Connection lost."

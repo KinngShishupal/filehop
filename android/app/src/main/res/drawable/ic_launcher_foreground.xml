@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A file hopping along an arc from "send" blue to "receive" green. 108dp canvas, art inside the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Hop arc -->
+    <path
+        android:pathData="M34,70 C47.33,43.33 60.67,43.33 74,70"
+        android:strokeWidth="5"
+        android:strokeLineCap="round">
+        <aapt:attr name="android:strokeColor">
+            <gradient
+                android:type="linear"
+                android:startX="34"
+                android:startY="0"
+                android:endX="74"
+                android:endY="0"
+                android:startColor="#4F7CFF"
+                android:endColor="#22C58B" />
+        </aapt:attr>
+    </path>
+    <!-- Landing arrowhead -->
+    <path
+        android:pathData="M76.1,61.3 L74,70 L65.7,66.4"
+        android:strokeColor="#22C58B"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <!-- Take-off dot -->
+    <path
+        android:fillColor="#4F7CFF"
+        android:pathData="M34,70m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+    <!-- File -->
+    <path
+        android:fillColor="#F4F6FB"
+        android:pathData="M48.5,24 H57 L63,30 V42.5 Q63,45 60.5,45 H48.5 Q46,45 46,42.5 V26.5 Q46,24 48.5,24 Z" />
+    <path
+        android:fillColor="#B8C2D9"
+        android:pathData="M57,24 V28 Q57,30 59,30 H63 Z" />
+    <path
+        android:pathData="M50,35 H58.5 M50,39.5 H55.5"
+        android:strokeColor="#8C96AD"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round" />
+</vector>
