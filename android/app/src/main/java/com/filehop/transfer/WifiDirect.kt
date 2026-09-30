@@ -96,6 +96,11 @@ class WifiDirect(context: Context) {
       hosting = true
       hostArgs = Triple(deviceId, name, port)
       quiet = isTransferring
+      // Start from a clean slate: a leftover group (e.g. an old 5 GHz one) may be undiscoverable.
+      if (groupInfo() != null) {
+        runCatching { action { manager!!.removeGroup(channel, it) } }
+        Thread.sleep(500)
+      }
       val ok = ensureHosted()
       maintenance?.cancel(false)
       maintenance =
@@ -124,11 +129,7 @@ class WifiDirect(context: Context) {
       }
       if (group == null) {
         advertisedGroup = null
-        action { m.createGroup(c, it) } // Also switches Wi-Fi Direct on.
-        ownsGroup = true
-        group =
-          waitFor(10_000) { groupInfo()?.takeIf { it.isGroupOwner && !it.passphrase.isNullOrEmpty() } }
-            ?: throw IOException("Group didn't come up")
+        group = createGroup(m, c)
       }
       if (advertisedGroup != group.networkName) {
         val record =
@@ -153,6 +154,30 @@ class WifiDirect(context: Context) {
       Log.w(TAG, "Wi-Fi Direct hosting unavailable", e)
       false
     }
+  }
+
+  /**
+   * Leaves the band to the chip. Don't force 5 GHz here: senders find receivers through Wi-Fi
+   * Direct discovery, which searches the 2.4 GHz "social" channels, and a group owner sitting on
+   * 5 GHz never shows up there (tested: 5 GHz receivers got no discovery queries at all).
+   * Also switches an idle Wi-Fi Direct on.
+   */
+  private fun createGroup(m: WifiP2pManager, c: WifiP2pManager.Channel): WifiP2pGroup {
+    action { m.createGroup(c, it) }
+    ownsGroup = true
+    val group =
+      waitFor(10_000) { groupInfo()?.takeIf { it.isGroupOwner && !it.passphrase.isNullOrEmpty() } }
+        ?: throw IOException("Group didn't come up")
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+      Log.i(TAG, "Wi-Fi Direct group on ${group.frequency} MHz")
+    }
+    return group
+  }
+
+  /** Stops any peer scan: scanning hops channels and slashes throughput mid-transfer. */
+  fun quietRadio() {
+    val m = manager ?: return
+    main.post { m.stopPeerDiscovery(channel, null) }
   }
 
   fun stopHosting() {
@@ -181,6 +206,7 @@ class WifiDirect(context: Context) {
   private var scanning = false
   private var ownId = ""
   private var onPeer: ((Peer) -> Unit)? = null
+  private var isTransferring: () -> Boolean = { false }
   private var ticks = 0
   @Volatile private var connecting = false
   @Volatile private var joined = false
@@ -195,12 +221,14 @@ class WifiDirect(context: Context) {
           // Discovery is paused while connected, so don't let the peer we're talking to expire.
           if (seen.at >= cutoff || connecting || joined) onPeer?.invoke(seen.peer)
         }
-        if (ticks++ % REDISCOVER_EVERY_TICKS == 0 && !connecting && !joined) discover()
+        val busy = connecting || joined || isTransferring()
+        if (busy) ticks = 1 // Rediscover a full interval after things go quiet, not mid-transfer.
+        else if (ticks++ % REDISCOVER_EVERY_TICKS == 0) discover()
         main.postDelayed(this, 1_000)
       }
     }
 
-  fun startScanning(ownDeviceId: String, onPeer: (Peer) -> Unit) {
+  fun startScanning(ownDeviceId: String, isTransferring: () -> Boolean, onPeer: (Peer) -> Unit) {
     val m = manager ?: return
     val c = channel ?: return
     main.post {
@@ -208,6 +236,7 @@ class WifiDirect(context: Context) {
       scanning = true
       ownId = ownDeviceId
       this.onPeer = onPeer
+      this.isTransferring = isTransferring
       ticks = 0
       try {
         m.setDnsSdResponseListeners(
@@ -220,6 +249,8 @@ class WifiDirect(context: Context) {
         scanning = false
         return@post
       }
+      m.clearServiceRequests(c, null) // Drop anything left from a previous session.
+      requestRegistered = false
       main.post(tick)
     }
   }
@@ -232,6 +263,7 @@ class WifiDirect(context: Context) {
       main.removeCallbacks(tick)
       val m = manager ?: return@post
       m.clearServiceRequests(channel, null)
+      requestRegistered = false
       m.stopPeerDiscovery(channel, null)
     }
   }
@@ -257,25 +289,56 @@ class WifiDirect(context: Context) {
     onPeer?.invoke(peer)
   }
 
+  // Ask for the instance *and* type: a type-only query just returns the PTR record, and the id,
+  // name, port and credentials we need live in the TXT record (seen on device: PTR-only replies).
+  private val serviceRequest = WifiP2pDnsSdServiceRequest.newInstance(SERVICE_INSTANCE, SERVICE_TYPE)
+
+  /**
+   * Registered once and kept: the framework only delivers a reply to a request that's still
+   * registered under the same transaction id, and replies arrive seconds after the query. Clearing
+   * and re-adding each round (as this used to) meant every reply was dropped. Main thread only.
+   */
+  private var requestRegistered = false
+
   private fun discover() {
     val m = manager ?: return
     val c = channel ?: return
-    val request = WifiP2pDnsSdServiceRequest.newInstance(SERVICE_TYPE)
+    val search = {
+      m.discoverServices(
+        c,
+        object : WifiP2pManager.ActionListener {
+          override fun onSuccess() = Unit
+
+          override fun onFailure(reason: Int) {
+            Log.d(TAG, "Discovery step discoverServices failed: ${reasonName(reason)}")
+            // Wi-Fi Direct was switched off and took our request with it; re-add next round.
+            requestRegistered = false
+          }
+        },
+      )
+    }
     // discoverPeers first: it's what switches an idle Wi-Fi Direct back on (see the receiver notes).
-    // Each later step runs whether or not the previous one succeeded.
     m.discoverPeers(
       c,
       always("discoverPeers") {
-        m.clearServiceRequests(
-          c,
-          always("clearServiceRequests") {
-            m.addServiceRequest(
-              c,
-              request,
-              always("addServiceRequest") { m.discoverServices(c, always("discoverServices") {}) },
-            )
-          },
-        )
+        if (requestRegistered) {
+          search()
+        } else {
+          m.addServiceRequest(
+            c,
+            serviceRequest,
+            object : WifiP2pManager.ActionListener {
+              override fun onSuccess() {
+                requestRegistered = true
+                search()
+              }
+
+              override fun onFailure(reason: Int) {
+                Log.d(TAG, "Discovery step addServiceRequest failed: ${reasonName(reason)}")
+              }
+            },
+          )
+        }
       },
     )
   }

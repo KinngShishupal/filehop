@@ -261,7 +261,7 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
             .also { it.start() }
       }
       if (useDirect && direct.isAvailable) {
-        direct.startScanning(deviceId) { peer -> emitDevice(peer.id, peer.name, "", peer.port, "direct") }
+        direct.startScanning(deviceId, engine::hasActiveTransfers) { peer -> emitDevice(peer.id, peer.name, "", peer.port, "direct") }
       }
       promise.resolve(null)
     } catch (e: Exception) {
@@ -371,6 +371,7 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
 
   override fun onState(transferId: String, direction: Direction, state: String, error: String?) {
     setBusy(transferId, state !in TransferState.TERMINAL)
+    if (state == TransferState.TRANSFERRING) direct.quietRadio()
     emit(
       EVENT_STATE,
       Arguments.createMap().apply {
@@ -436,8 +437,13 @@ class FileHopModule(private val reactContext: ReactApplicationContext) :
   @Suppress("DEPRECATION")
   private fun acquirePowerLocks() {
     val wifi = reactContext.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+    // HIGH_PERF is a no-op on recent Android; LOW_LATENCY disables Wi-Fi power save while the
+    // screen is on and we're in the foreground (we keep the screen on during transfers).
+    val mode =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+      else WifiManager.WIFI_MODE_FULL_HIGH_PERF
     wifiLock =
-      wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "FileHop:wifi").apply {
+      wifi.createWifiLock(mode, "FileHop:wifi").apply {
         setReferenceCounted(false)
         acquire()
       }
