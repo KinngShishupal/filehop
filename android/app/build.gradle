@@ -101,7 +101,7 @@ android {
 
     namespace "com.filehop"
     defaultConfig {
-        applicationId "com.filehop"
+        applicationId "com.kinngshishupal.filehop"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
