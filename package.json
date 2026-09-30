@@ -4,6 +4,11 @@
   "private": true,
   "scripts": {
     "android": "react-native run-android",
+    "android:apk": "node scripts/android-build.js apk",
+    "android:aab": "node scripts/android-build.js aab",
+    "android:apk:debug": "node scripts/android-build.js debug-apk",
+    "android:keystore": "node scripts/create-keystore.js",
+    "android:clean": "cd android && gradlew clean",
     "ios": "react-native run-ios",
     "lint": "eslint .",
     "start": "react-native start",
